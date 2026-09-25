@@ -4,3 +4,5 @@ pydantic-settings
 tree-sitter
 tree-sitter-python
 pytest
+google-genai
+pinecone

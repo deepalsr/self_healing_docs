@@ -2,6 +2,10 @@
 
 from app.diffing.ast_parser import diff_definitions
 from app.chunking.chunker import chunk_diff
+from app.vectorstore.pinecone_client import split_chunks_by_action
+
+
+
 
 OLD_CODE = """
 def get_user(id):
@@ -66,3 +70,15 @@ def test_deleted_chunk_id_is_unique_by_file_and_function():
     chunks = chunk_diff(diff_result, "fake_file.py")
     delete_user_chunk = next(c for c in chunks if c["metadata"]["function_name"] == "delete_user")
     assert delete_user_chunk["chunk_id"] == "fake_file.py::delete_user"
+
+def test_deleted_chunks_are_never_upserted():
+    diff_result = diff_definitions(OLD_CODE, NEW_CODE)
+    chunks = chunk_diff(diff_result, "fake_file.py")
+
+    to_upsert, to_delete = split_chunks_by_action(chunks)
+
+    upsert_change_types = [c["metadata"]["change_type"] for c in to_upsert]
+    assert "deleted" not in upsert_change_types
+
+    delete_names = [c["metadata"]["function_name"] for c in to_delete]
+    assert "delete_user" in delete_names
