@@ -89,3 +89,51 @@ def test_embed_text_returns_correct_dimension():
     assert isinstance(vector, list)
     assert len(vector) == EMBEDDING_DIMENSION
     assert all(isinstance(x, float) for x in vector)
+
+from app.vectorstore.pinecone_client import (
+    ensure_index_exists,
+    sync_chunks_to_pinecone,
+    get_index,
+)
+
+TEST_NAMESPACE = "pytest-integration-test"
+
+
+def test_sync_chunks_to_pinecone_upserts_and_deletes():
+    ensure_index_exists()
+    index = get_index()
+
+    diff_result = diff_definitions(OLD_CODE, NEW_CODE)
+    chunks = chunk_diff(diff_result, "fake_file.py")
+
+    try:
+        # Act: sync all chunks (added, modified go to upsert; deleted goes to delete)
+        sync_chunks_to_pinecone(chunks, namespace=TEST_NAMESPACE)
+
+        # Give Pinecone a moment to make upserts queryable
+        # (Pinecone upserts are eventually consistent, not instant)
+        import time
+        time.sleep(2)
+
+        # Assert: added/modified chunks exist
+        fetched = index.fetch(
+            ids=["fake_file.py::create_user", "fake_file.py::get_user"],
+            namespace=TEST_NAMESPACE,
+        )
+        assert "fake_file.py::create_user" in fetched.vectors
+        assert "fake_file.py::get_user" in fetched.vectors
+
+        # Assert: deleted chunk was never inserted / does not exist
+        fetched_deleted = index.fetch(
+            ids=["fake_file.py::delete_user"],
+            namespace=TEST_NAMESPACE,
+        )
+        assert "fake_file.py::delete_user" not in fetched_deleted.vectors
+
+    finally:
+        # Cleanup: remove all test data regardless of pass/fail,
+        # so this test never leaves orphaned vectors behind
+        index.delete(
+            ids=["fake_file.py::create_user", "fake_file.py::get_user", "fake_file.py::delete_user"],
+            namespace=TEST_NAMESPACE,
+        )
