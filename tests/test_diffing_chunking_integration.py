@@ -3,6 +3,7 @@
 from app.diffing.ast_parser import diff_definitions
 from app.chunking.chunker import chunk_diff
 from app.vectorstore.pinecone_client import split_chunks_by_action
+from app.embeddings.embedder import embed_text, EMBEDDING_DIMENSION
 
 
 
@@ -82,3 +83,9 @@ def test_deleted_chunks_are_never_upserted():
 
     delete_names = [c["metadata"]["function_name"] for c in to_delete]
     assert "delete_user" in delete_names
+
+def test_embed_text_returns_correct_dimension():
+    vector = embed_text("def get_user(id): return db.query(id)")
+    assert isinstance(vector, list)
+    assert len(vector) == EMBEDDING_DIMENSION
+    assert all(isinstance(x, float) for x in vector)
