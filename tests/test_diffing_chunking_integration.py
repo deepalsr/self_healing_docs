@@ -171,3 +171,67 @@ def test_retrieve_context_finds_exact_match_when_chunk_exists():
     finally:
         # Cleanup, regardless of pass/fail
         index.delete(ids=["fake_file.py::existing_function"], namespace=TEST_NAMESPACE)
+
+def test_retrieve_context_falls_back_to_similarity_when_no_exact_match():
+    index = get_index()
+
+    existing_chunks = [
+        {
+            "chunk_id": "fake_file.py::fetch_account",
+            "embed_text": "Function: fetch_account\nFile: fake_file.py\ndef fetch_account(account_id): return db.get_account(account_id)",
+            "metadata": {
+                "chunk_id": "fake_file.py::fetch_account",
+                "function_name": "fetch_account",
+                "file_path": "fake_file.py",
+                "change_type": "added",
+            },
+        },
+        {
+            "chunk_id": "fake_file.py::fetch_order",
+            "embed_text": "Function: fetch_order\nFile: fake_file.py\ndef fetch_order(order_id): return db.get_order(order_id)",
+            "metadata": {
+                "chunk_id": "fake_file.py::fetch_order",
+                "function_name": "fetch_order",
+                "file_path": "fake_file.py",
+                "change_type": "added",
+            },
+        },
+    ]
+
+    # This chunk is NEW -- deliberately never upserted, so Tier 1 must find nothing
+    new_chunk = {
+        "chunk_id": "fake_file.py::fetch_customer",
+        "embed_text": "Function: fetch_customer\nFile: fake_file.py\ndef fetch_customer(customer_id): return db.get_customer(customer_id)",
+        "metadata": {
+            "chunk_id": "fake_file.py::fetch_customer",
+            "function_name": "fetch_customer",
+            "file_path": "fake_file.py",
+            "change_type": "added",
+        },
+    }
+
+    try:
+        # Setup: only upsert the two "existing" chunks, never the query chunk itself
+        upsert_chunks(existing_chunks, namespace=TEST_NAMESPACE)
+
+        import time
+        time.sleep(2)
+
+        # Act
+        result = retrieve_context_for_chunk(new_chunk, namespace=TEST_NAMESPACE)
+
+        # Assert: no exact match existed, so it must fall back to similarity
+        assert result["strategy"] == "similarity_fallback"
+        assert len(result["results"]) > 0
+
+        # The similar functions (fetch_account, fetch_order) should be semantically
+        # close enough to fetch_customer to show up, since all three share the
+        # "fetch by id" pattern
+        returned_ids = [r["chunk_id"] for r in result["results"]]
+        assert "fake_file.py::fetch_account" in returned_ids or "fake_file.py::fetch_order" in returned_ids
+
+    finally:
+        index.delete(
+            ids=["fake_file.py::fetch_account", "fake_file.py::fetch_order"],
+            namespace=TEST_NAMESPACE,
+        )
