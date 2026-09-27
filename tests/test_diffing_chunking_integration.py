@@ -4,6 +4,8 @@ from app.diffing.ast_parser import diff_definitions
 from app.chunking.chunker import chunk_diff
 from app.vectorstore.pinecone_client import split_chunks_by_action
 from app.embeddings.embedder import embed_text, EMBEDDING_DIMENSION
+from app.retrieval.retriever import retrieve_context_for_chunk
+from app.vectorstore.pinecone_client import upsert_chunks
 
 
 
@@ -137,3 +139,35 @@ def test_sync_chunks_to_pinecone_upserts_and_deletes():
             ids=["fake_file.py::create_user", "fake_file.py::get_user", "fake_file.py::delete_user"],
             namespace=TEST_NAMESPACE,
         )
+
+def test_retrieve_context_finds_exact_match_when_chunk_exists():
+    index = get_index()
+
+    fake_chunk = {
+        "chunk_id": "fake_file.py::existing_function",
+        "embed_text": "Function: existing_function\nFile: fake_file.py\ndef existing_function(x): return x * 2",
+        "metadata": {
+            "chunk_id": "fake_file.py::existing_function",
+            "function_name": "existing_function",
+            "file_path": "fake_file.py",
+            "change_type": "added",
+        },
+    }
+
+    try:
+        # Setup: put this chunk into Pinecone first, simulating "already documented before"
+        upsert_chunks([fake_chunk], namespace=TEST_NAMESPACE)
+
+        import time
+        time.sleep(2)  # eventual consistency, same reasoning as Step 5's test
+
+        # Act
+        result = retrieve_context_for_chunk(fake_chunk, namespace=TEST_NAMESPACE)
+
+        # Assert: Tier 1 should find it directly, no similarity fallback needed
+        assert result["strategy"] == "exact_match"
+        assert result["results"][0]["chunk_id"] == "fake_file.py::existing_function"
+
+    finally:
+        # Cleanup, regardless of pass/fail
+        index.delete(ids=["fake_file.py::existing_function"], namespace=TEST_NAMESPACE)
