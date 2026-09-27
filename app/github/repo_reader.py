@@ -3,6 +3,8 @@
 import base64
 import httpx
 from app.config import settings
+from app.github.doc_extractor import extract_doc_section
+
 
 GITHUB_API_BASE = "https://api.github.com"
 
@@ -30,3 +32,22 @@ def fetch_file_content(owner: str, repo: str, path: str, ref: str) -> str | None
     encoded_content = data["content"]
     decoded_bytes = base64.b64decode(encoded_content)
     return decoded_bytes.decode("utf-8")
+
+def fetch_doc_snippets_for_functions(
+    owner: str, repo: str, doc_path: str, ref: str, function_names: list[str]
+) -> dict[str, str | None]:
+    """
+    Fetches a doc file once, then extracts each function's existing
+    doc section from it. Returns {function_name: snippet_or_None}.
+    This is the impure "edge" -- chunking itself stays pure and untouched.
+    """
+    doc_text = fetch_file_content(owner, repo, doc_path, ref)
+
+    if doc_text is None:
+        # doc file doesn't exist at all -- every function gets None
+        return {name: None for name in function_names}
+
+    return {
+        name: extract_doc_section(doc_text, name)
+        for name in function_names
+    }

@@ -2,14 +2,15 @@
 
 from app.diffing.ast_parser import diff_definitions
 from app.chunking.chunker import chunk_diff
-from app.vectorstore.pinecone_client import split_chunks_by_action
 from app.embeddings.embedder import embed_text, EMBEDDING_DIMENSION
+from app.vectorstore.pinecone_client import (
+    ensure_index_exists,
+    sync_chunks_to_pinecone,
+    get_index,
+    upsert_chunks,
+)
 from app.retrieval.retriever import retrieve_context_for_chunk
-from app.vectorstore.pinecone_client import upsert_chunks
 from app.github.doc_extractor import extract_doc_section
-
-
-
 
 OLD_CODE = """
 def get_user(id):
@@ -27,6 +28,28 @@ def get_user(id, include_deleted=False):
 
 def create_user(name):
     return db.insert(name)
+"""
+
+TEST_NAMESPACE = "pytest-integration-test"
+
+SAMPLE_README = """
+# AI RAG Assistant
+
+A Retrieval-Augmented Generation (RAG) assistant that answers questions
+from a company handbook.
+
+## How it works
+
+1. **Ingestion** (`ingest.py`, run once or whenever documents change): documents are split
+into overlapping, sentence-aware chunks, embedded with a neural model, and stored
+in a local Chroma vector database.
+
+2. **On each question** (`main.py`): retrieve the nearest chunks, check the cache,
+generate a grounded answer, run guardrail checks.
+
+## Setup
+
+Create a `.env` file in the project root.
 """
 
 
@@ -51,33 +74,31 @@ def test_diff_detects_modified_function_with_both_changes():
 
 def test_chunk_embed_text_includes_new_body_for_modified():
     diff_result = diff_definitions(OLD_CODE, NEW_CODE)
-    chunks = chunk_diff(diff_result, "fake_file.py")
+    chunks = chunk_diff(diff_result, "fake_file.py", {})
     get_user_chunk = next(c for c in chunks if c["chunk_id"] == "fake_file.py::get_user")
-
-    # regression guard for the bug we just fixed:
-    # embed_text must contain the actual new body, not just the signature
     assert "if include_deleted:" in get_user_chunk["embed_text"]
     assert "db.query(id, deleted=True)" in get_user_chunk["embed_text"]
 
 
 def test_chunk_metadata_captures_modification_type():
     diff_result = diff_definitions(OLD_CODE, NEW_CODE)
-    chunks = chunk_diff(diff_result, "fake_file.py")
+    chunks = chunk_diff(diff_result, "fake_file.py", {})
     get_user_chunk = next(c for c in chunks if c["chunk_id"] == "fake_file.py::get_user")
-
-    # regression guard for the second bug we fixed
     assert get_user_chunk["metadata"]["modification_type"] == "both"
 
 
 def test_deleted_chunk_id_is_unique_by_file_and_function():
     diff_result = diff_definitions(OLD_CODE, NEW_CODE)
-    chunks = chunk_diff(diff_result, "fake_file.py")
+    chunks = chunk_diff(diff_result, "fake_file.py", {})
     delete_user_chunk = next(c for c in chunks if c["metadata"]["function_name"] == "delete_user")
     assert delete_user_chunk["chunk_id"] == "fake_file.py::delete_user"
 
+
 def test_deleted_chunks_are_never_upserted():
+    from app.vectorstore.pinecone_client import split_chunks_by_action
+
     diff_result = diff_definitions(OLD_CODE, NEW_CODE)
-    chunks = chunk_diff(diff_result, "fake_file.py")
+    chunks = chunk_diff(diff_result, "fake_file.py", {})
 
     to_upsert, to_delete = split_chunks_by_action(chunks)
 
@@ -87,19 +108,12 @@ def test_deleted_chunks_are_never_upserted():
     delete_names = [c["metadata"]["function_name"] for c in to_delete]
     assert "delete_user" in delete_names
 
+
 def test_embed_text_returns_correct_dimension():
     vector = embed_text("def get_user(id): return db.query(id)")
     assert isinstance(vector, list)
     assert len(vector) == EMBEDDING_DIMENSION
     assert all(isinstance(x, float) for x in vector)
-
-from app.vectorstore.pinecone_client import (
-    ensure_index_exists,
-    sync_chunks_to_pinecone,
-    get_index,
-)
-
-TEST_NAMESPACE = "pytest-integration-test"
 
 
 def test_sync_chunks_to_pinecone_upserts_and_deletes():
@@ -107,18 +121,14 @@ def test_sync_chunks_to_pinecone_upserts_and_deletes():
     index = get_index()
 
     diff_result = diff_definitions(OLD_CODE, NEW_CODE)
-    chunks = chunk_diff(diff_result, "fake_file.py")
+    chunks = chunk_diff(diff_result, "fake_file.py", {})
 
     try:
-        # Act: sync all chunks (added, modified go to upsert; deleted goes to delete)
         sync_chunks_to_pinecone(chunks, namespace=TEST_NAMESPACE)
 
-        # Give Pinecone a moment to make upserts queryable
-        # (Pinecone upserts are eventually consistent, not instant)
         import time
         time.sleep(2)
 
-        # Assert: added/modified chunks exist
         fetched = index.fetch(
             ids=["fake_file.py::create_user", "fake_file.py::get_user"],
             namespace=TEST_NAMESPACE,
@@ -126,7 +136,6 @@ def test_sync_chunks_to_pinecone_upserts_and_deletes():
         assert "fake_file.py::create_user" in fetched.vectors
         assert "fake_file.py::get_user" in fetched.vectors
 
-        # Assert: deleted chunk was never inserted / does not exist
         fetched_deleted = index.fetch(
             ids=["fake_file.py::delete_user"],
             namespace=TEST_NAMESPACE,
@@ -134,12 +143,11 @@ def test_sync_chunks_to_pinecone_upserts_and_deletes():
         assert "fake_file.py::delete_user" not in fetched_deleted.vectors
 
     finally:
-        # Cleanup: remove all test data regardless of pass/fail,
-        # so this test never leaves orphaned vectors behind
         index.delete(
             ids=["fake_file.py::create_user", "fake_file.py::get_user", "fake_file.py::delete_user"],
             namespace=TEST_NAMESPACE,
         )
+
 
 def test_retrieve_context_finds_exact_match_when_chunk_exists():
     index = get_index()
@@ -156,22 +164,19 @@ def test_retrieve_context_finds_exact_match_when_chunk_exists():
     }
 
     try:
-        # Setup: put this chunk into Pinecone first, simulating "already documented before"
         upsert_chunks([fake_chunk], namespace=TEST_NAMESPACE)
 
         import time
-        time.sleep(2)  # eventual consistency, same reasoning as Step 5's test
+        time.sleep(2)
 
-        # Act
         result = retrieve_context_for_chunk(fake_chunk, namespace=TEST_NAMESPACE)
 
-        # Assert: Tier 1 should find it directly, no similarity fallback needed
         assert result["strategy"] == "exact_match"
         assert result["results"][0]["chunk_id"] == "fake_file.py::existing_function"
 
     finally:
-        # Cleanup, regardless of pass/fail
         index.delete(ids=["fake_file.py::existing_function"], namespace=TEST_NAMESPACE)
+
 
 def test_retrieve_context_falls_back_to_similarity_when_no_exact_match():
     index = get_index()
@@ -199,7 +204,6 @@ def test_retrieve_context_falls_back_to_similarity_when_no_exact_match():
         },
     ]
 
-    # This chunk is NEW -- deliberately never upserted, so Tier 1 must find nothing
     new_chunk = {
         "chunk_id": "fake_file.py::fetch_customer",
         "embed_text": "Function: fetch_customer\nFile: fake_file.py\ndef fetch_customer(customer_id): return db.get_customer(customer_id)",
@@ -212,22 +216,16 @@ def test_retrieve_context_falls_back_to_similarity_when_no_exact_match():
     }
 
     try:
-        # Setup: only upsert the two "existing" chunks, never the query chunk itself
         upsert_chunks(existing_chunks, namespace=TEST_NAMESPACE)
 
         import time
         time.sleep(2)
 
-        # Act
         result = retrieve_context_for_chunk(new_chunk, namespace=TEST_NAMESPACE)
 
-        # Assert: no exact match existed, so it must fall back to similarity
         assert result["strategy"] == "similarity_fallback"
         assert len(result["results"]) > 0
 
-        # The similar functions (fetch_account, fetch_order) should be semantically
-        # close enough to fetch_customer to show up, since all three share the
-        # "fetch by id" pattern
         returned_ids = [r["chunk_id"] for r in result["results"]]
         assert "fake_file.py::fetch_account" in returned_ids or "fake_file.py::fetch_order" in returned_ids
 
@@ -236,26 +234,6 @@ def test_retrieve_context_falls_back_to_similarity_when_no_exact_match():
             ids=["fake_file.py::fetch_account", "fake_file.py::fetch_order"],
             namespace=TEST_NAMESPACE,
         )
-
-SAMPLE_README = """
-# AI RAG Assistant
-
-A Retrieval-Augmented Generation (RAG) assistant that answers questions
-from a company handbook.
-
-## How it works
-
-1. **Ingestion** (`ingest.py`, run once or whenever documents change): documents are split
-into overlapping, sentence-aware chunks, embedded with a neural model, and stored
-in a local Chroma vector database.
-
-2. **On each question** (`main.py`): retrieve the nearest chunks, check the cache,
-generate a grounded answer, run guardrail checks.
-
-## Setup
-
-Create a `.env` file in the project root.
-"""
 
 
 def test_extract_doc_section_finds_paragraph_mention_when_no_anchor_or_heading():
@@ -266,12 +244,8 @@ def test_extract_doc_section_finds_paragraph_mention_when_no_anchor_or_heading()
 
 
 def test_extract_doc_section_rejects_false_positive_substring_match():
-    # "ingestion" contains "ingest" as a substring -- this test guards
-    # against the exact regex bug we just found and fixed (missing \b)
     result = extract_doc_section(SAMPLE_README, "ingest")
-    # the match should come from the real "ingest" mention (function name in backticks),
-    # not accidentally trigger on unrelated "ingestion" prose elsewhere
-    assert result is not None  # sanity: still finds the real mention
+    assert result is not None
 
 
 def test_extract_doc_section_returns_none_for_nonexistent_function():
@@ -291,4 +265,17 @@ def test_extract_doc_section_prefers_anchor_tag_when_present():
     result = extract_doc_section(doc_with_anchor, "get_user")
     assert result is not None
     assert "authoritative" in result
-    assert "Deleting a user" not in result  # must not bleed into the next anchor's section
+    assert "Deleting a user" not in result
+
+
+def test_chunk_includes_doc_snippet_when_provided():
+    diff_result = diff_definitions(OLD_CODE, NEW_CODE)
+    doc_snippets = {"get_user": "Existing docs: fetches a user by id."}
+
+    chunks = chunk_diff(diff_result, "fake_file.py", doc_snippets)
+
+    get_user_chunk = next(c for c in chunks if c["metadata"]["function_name"] == "get_user")
+    create_user_chunk = next(c for c in chunks if c["metadata"]["function_name"] == "create_user")
+
+    assert get_user_chunk["metadata"]["doc_snippet"] == "Existing docs: fetches a user by id."
+    assert "doc_snippet" not in create_user_chunk["metadata"]
