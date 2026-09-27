@@ -6,3 +6,4 @@ tree-sitter-python
 pytest
 google-genai
 pinecone
+httpx

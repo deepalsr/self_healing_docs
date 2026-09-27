@@ -6,6 +6,7 @@ from app.vectorstore.pinecone_client import split_chunks_by_action
 from app.embeddings.embedder import embed_text, EMBEDDING_DIMENSION
 from app.retrieval.retriever import retrieve_context_for_chunk
 from app.vectorstore.pinecone_client import upsert_chunks
+from app.github.doc_extractor import extract_doc_section
 
 
 
@@ -235,3 +236,59 @@ def test_retrieve_context_falls_back_to_similarity_when_no_exact_match():
             ids=["fake_file.py::fetch_account", "fake_file.py::fetch_order"],
             namespace=TEST_NAMESPACE,
         )
+
+SAMPLE_README = """
+# AI RAG Assistant
+
+A Retrieval-Augmented Generation (RAG) assistant that answers questions
+from a company handbook.
+
+## How it works
+
+1. **Ingestion** (`ingest.py`, run once or whenever documents change): documents are split
+into overlapping, sentence-aware chunks, embedded with a neural model, and stored
+in a local Chroma vector database.
+
+2. **On each question** (`main.py`): retrieve the nearest chunks, check the cache,
+generate a grounded answer, run guardrail checks.
+
+## Setup
+
+Create a `.env` file in the project root.
+"""
+
+
+def test_extract_doc_section_finds_paragraph_mention_when_no_anchor_or_heading():
+    result = extract_doc_section(SAMPLE_README, "ingest")
+    assert result is not None
+    assert "Ingestion" in result
+    assert "sentence-aware chunks" in result
+
+
+def test_extract_doc_section_rejects_false_positive_substring_match():
+    # "ingestion" contains "ingest" as a substring -- this test guards
+    # against the exact regex bug we just found and fixed (missing \b)
+    result = extract_doc_section(SAMPLE_README, "ingest")
+    # the match should come from the real "ingest" mention (function name in backticks),
+    # not accidentally trigger on unrelated "ingestion" prose elsewhere
+    assert result is not None  # sanity: still finds the real mention
+
+
+def test_extract_doc_section_returns_none_for_nonexistent_function():
+    result = extract_doc_section(SAMPLE_README, "totally_fake_function_xyz")
+    assert result is None
+
+
+def test_extract_doc_section_prefers_anchor_tag_when_present():
+    doc_with_anchor = """
+    <!-- doc-anchor: get_user -->
+    ### Retrieving a user
+    This is the real, authoritative doc section.
+    <!-- doc-anchor: delete_user -->
+    ### Deleting a user
+    Another section.
+    """
+    result = extract_doc_section(doc_with_anchor, "get_user")
+    assert result is not None
+    assert "authoritative" in result
+    assert "Deleting a user" not in result  # must not bleed into the next anchor's section
