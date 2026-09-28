@@ -1,5 +1,5 @@
 # tests/test_diffing_chunking_integration.py
-
+import pytest
 from app.diffing.ast_parser import diff_definitions
 from app.chunking.chunker import chunk_diff
 from app.embeddings.embedder import embed_text, EMBEDDING_DIMENSION
@@ -11,6 +11,7 @@ from app.vectorstore.pinecone_client import (
 )
 from app.retrieval.retriever import retrieve_context_for_chunk
 from app.github.doc_extractor import extract_doc_section
+from app.generation.patch_generator import build_prompt, parse_patch, PatchParseError
 
 OLD_CODE = """
 def get_user(id):
@@ -279,3 +280,45 @@ def test_chunk_includes_doc_snippet_when_provided():
 
     assert get_user_chunk["metadata"]["doc_snippet"] == "Existing docs: fetches a user by id."
     assert "doc_snippet" not in create_user_chunk["metadata"]
+
+GEN_CHUNK = {
+    "chunk_id": "f.py::get_user",
+    "embed_text": "Function: get_user\nFile: f.py\ndef get_user(id, include_deleted=False)\n\nbody here",
+    "metadata": {
+        "function_name": "get_user",
+        "change_type": "modified",
+        "modification_type": "both",
+        "old_signature": "def get_user(id)",
+        "new_signature": "def get_user(id, include_deleted=False)",
+        "doc_snippet": "Retrieves a user by ID.",
+    },
+}
+EXACT = {"strategy": "exact_match", "results": []}
+
+
+def test_prompt_uses_replace_mode_with_fresh_doc_snippet():
+    prompt = build_prompt(GEN_CHUNK, EXACT)
+    assert "MODE: replace" in prompt
+    assert "Retrieves a user by ID." in prompt
+
+
+def test_prompt_uses_insert_mode_when_no_doc_snippet():
+    chunk = {**GEN_CHUNK, "metadata": {k: v for k, v in GEN_CHUNK["metadata"].items() if k != "doc_snippet"}}
+    prompt = build_prompt(chunk, {"strategy": "similarity_fallback", "results": []})
+    assert "MODE: insert" in prompt
+
+
+def test_prompt_includes_feedback_on_retry():
+    assert "too broad" in build_prompt(GEN_CHUNK, EXACT, feedback="too broad")
+
+
+def test_parse_patch_accepts_valid_json():
+    raw = '{"changes": [{"action": "replace", "target_anchor": "get_user", "old_text": "a", "new_text": "b"}]}'
+    assert parse_patch(raw).changes[0].action == "replace"
+
+
+def test_parse_patch_rejects_bad_json_and_bad_action():
+    with pytest.raises(PatchParseError):
+        parse_patch("not json at all")
+    with pytest.raises(PatchParseError):
+        parse_patch('{"changes": [{"action": "delete_everything", "target_anchor": "x", "old_text": "", "new_text": ""}]}')

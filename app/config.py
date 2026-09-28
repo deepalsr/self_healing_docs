@@ -8,6 +8,7 @@ class Settings(BaseSettings):
     GEMINI_API_KEY: str
     PINECONE_API_KEY: str
     GITHUB_TOKEN: str
+    GENERATION_MODEL: str = "gemini-3.5-flash"  # pinned explicitly, override via .env
 
     model_config = SettingsConfigDict(env_file=".env")
 
