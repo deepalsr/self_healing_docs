@@ -12,6 +12,8 @@ from app.vectorstore.pinecone_client import (
 from app.retrieval.retriever import retrieve_context_for_chunk
 from app.github.doc_extractor import extract_doc_section
 from app.generation.patch_generator import build_prompt, parse_patch, PatchParseError
+from app.guardrails import check_grounding
+from app.models.schemas import DocPatch, PatchChange
 
 OLD_CODE = """
 def get_user(id):
@@ -322,3 +324,45 @@ def test_parse_patch_rejects_bad_json_and_bad_action():
         parse_patch("not json at all")
     with pytest.raises(PatchParseError):
         parse_patch('{"changes": [{"action": "delete_everything", "target_anchor": "x", "old_text": "", "new_text": ""}]}')
+
+DOC = "Retrieves a user by ID. Returns None if missing."
+
+
+def _patch(action="replace", old="Retrieves a user by ID.",
+           new="Retrieves a user by ID, optionally including soft-deleted users."):
+    return DocPatch(changes=[PatchChange(
+        action=action, target_anchor="get_user", old_text=old, new_text=new
+    )])
+
+
+def test_grounding_passes_when_old_text_exists_verbatim():
+    assert check_grounding(_patch(), DOC).passed
+
+
+def test_grounding_rejects_hallucinated_old_text():
+    result = check_grounding(_patch(old="Fetches a user record."), DOC)
+    assert not result.passed
+    assert "not found verbatim" in result.reason
+
+
+def test_grounding_rejects_ambiguous_old_text():
+    doc = "Returns a user. Returns a user."
+    result = check_grounding(_patch(old="Returns a user.", new="Returns a user or None."), doc)
+    assert not result.passed
+    assert "matches 2 places" in result.reason
+
+
+def test_grounding_rejects_insert_when_docs_already_exist():
+    assert not check_grounding(_patch(action="insert", old=""), DOC).passed
+
+
+def test_grounding_rejects_replace_when_no_docs_exist():
+    assert not check_grounding(_patch(), None).passed
+
+
+def test_grounding_accepts_insert_for_undocumented_function():
+    assert check_grounding(_patch(action="insert", old="", new="Creates a user."), None).passed
+
+
+def test_grounding_rejects_noop_patch():
+    assert not check_grounding(_patch(new="Retrieves a user by ID."), DOC).passed
