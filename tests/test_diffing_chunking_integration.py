@@ -12,7 +12,7 @@ from app.vectorstore.pinecone_client import (
 from app.retrieval.retriever import retrieve_context_for_chunk
 from app.github.doc_extractor import extract_doc_section
 from app.generation.patch_generator import build_prompt, parse_patch, PatchParseError
-from app.guardrails import check_grounding
+from app.guardrails import check_grounding, check_scope
 from app.models.schemas import DocPatch, PatchChange
 
 OLD_CODE = """
@@ -366,3 +366,24 @@ def test_grounding_accepts_insert_for_undocumented_function():
 
 def test_grounding_rejects_noop_patch():
     assert not check_grounding(_patch(new="Retrieves a user by ID."), DOC).passed
+
+def test_scope_passes_when_anchor_is_allowed():
+    assert check_scope(_patch(), {"get_user"}).passed
+
+
+def test_scope_rejects_anchor_outside_allowed_set():
+    result = check_scope(_patch(), {"delete_user"})
+    assert not result.passed
+    assert "outside the allowed scope" in result.reason
+
+
+def test_scope_rejects_when_patch_touches_multiple_anchors_one_unauthorized():
+    patch = DocPatch(changes=[
+        PatchChange(action="replace", target_anchor="get_user",
+                    old_text="a", new_text="b"),
+        PatchChange(action="replace", target_anchor="delete_user",
+                    old_text="c", new_text="d"),
+    ])
+    result = check_scope(patch, {"get_user"})
+    assert not result.passed
+    assert "delete_user" in result.reason

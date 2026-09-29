@@ -59,3 +59,18 @@ def check_grounding(patch: DocPatch, existing_doc: str | None) -> GuardrailResul
             return GuardrailResult(False, f"{label}: new_text is identical to old_text (no-op).")
 
     return GuardrailResult(True)
+
+def check_scope(patch: DocPatch, allowed_anchors: set[str]) -> GuardrailResult:
+    """
+    Layer 2: pure, deterministic. Confirms the patch only touches the
+    function(s) this generation call was actually authorized to edit.
+    """
+    for i, change in enumerate(patch.changes):
+        if change.target_anchor not in allowed_anchors:
+            return GuardrailResult(
+                False,
+                f"change #{i + 1}: target_anchor '{change.target_anchor}' is outside "
+                f"the allowed scope {sorted(allowed_anchors)}. Only edit the function "
+                f"you were given.",
+            )
+    return GuardrailResult(True)
