@@ -14,6 +14,9 @@ from app.github.doc_extractor import extract_doc_section
 from app.generation.patch_generator import build_prompt, parse_patch, PatchParseError
 from app.guardrails import check_grounding, check_scope
 from app.models.schemas import DocPatch, PatchChange
+from unittest.mock import patch as mock_patch
+from app.generation.pipeline import generate_verified_patch, MAX_ATTEMPTS
+from app.models.schemas import DocPatch, PatchChange
 
 OLD_CODE = """
 def get_user(id):
@@ -387,3 +390,71 @@ def test_scope_rejects_when_patch_touches_multiple_anchors_one_unauthorized():
     result = check_scope(patch, {"get_user"})
     assert not result.passed
     assert "delete_user" in result.reason
+
+PIPE_CHUNK = {
+    "chunk_id": "f.py::get_user",
+    "embed_text": "Function: get_user\nFile: f.py\ndef get_user(id, include_deleted=False)\n\nbody",
+    "metadata": {
+        "function_name": "get_user",
+        "change_type": "modified",
+        "modification_type": "both",
+        "old_signature": "def get_user(id)",
+        "new_signature": "def get_user(id, include_deleted=False)",
+        "doc_snippet": "Retrieves a user by ID.",
+    },
+}
+PIPE_RETRIEVAL = {"strategy": "exact_match", "results": []}
+
+GOOD_PATCH = DocPatch(changes=[PatchChange(
+    action="replace", target_anchor="get_user",
+    old_text="Retrieves a user by ID.",
+    new_text="Retrieves a user by ID, optionally including soft-deleted users.",
+)])
+
+
+def test_pipeline_approves_on_first_try_when_all_layers_pass():
+    with mock_patch("app.generation.pipeline.generate_patch", return_value=GOOD_PATCH), \
+         mock_patch("app.generation.pipeline.judge_patch", return_value=__import__(
+             "app.generation.judge", fromlist=["JudgeResult"]
+         ).JudgeResult(approved=True, reason="accurate")):
+        result = generate_verified_patch(PIPE_CHUNK, PIPE_RETRIEVAL)
+
+    assert result.status == "approved"
+    assert result.attempts == 1
+
+
+def test_pipeline_retries_once_then_succeeds_and_passes_feedback_forward():
+    bad_patch = DocPatch(changes=[PatchChange(
+        action="replace", target_anchor="get_user",
+        old_text="this text does not exist in the doc",
+        new_text="wrong",
+    )])
+    calls = []
+
+    def fake_generate(chunk, retrieval, feedback=None):
+        calls.append(feedback)
+        return bad_patch if len(calls) == 1 else GOOD_PATCH
+
+    from app.generation.judge import JudgeResult
+    with mock_patch("app.generation.pipeline.generate_patch", side_effect=fake_generate), \
+         mock_patch("app.generation.pipeline.judge_patch", return_value=JudgeResult(True, "accurate")):
+        result = generate_verified_patch(PIPE_CHUNK, PIPE_RETRIEVAL)
+
+    assert result.status == "approved"
+    assert result.attempts == 2
+    assert calls[0] is None  # first attempt: no feedback yet
+    assert "not found verbatim" in calls[1]  # second attempt: fed Layer 1's rejection reason
+
+
+def test_pipeline_escalates_to_human_review_after_max_attempts():
+    always_bad = DocPatch(changes=[PatchChange(
+        action="replace", target_anchor="get_user",
+        old_text="never in the doc", new_text="wrong",
+    )])
+    with mock_patch("app.generation.pipeline.generate_patch", return_value=always_bad):
+        result = generate_verified_patch(PIPE_CHUNK, PIPE_RETRIEVAL)
+
+    assert result.status == "needs_human_review"
+    assert result.patch is None
+    assert result.attempts == MAX_ATTEMPTS
+    assert "not found verbatim" in result.reason
