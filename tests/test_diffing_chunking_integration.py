@@ -19,6 +19,10 @@ from app.generation.pipeline import generate_verified_patch, MAX_ATTEMPTS
 from app.models.schemas import DocPatch, PatchChange
 from app.github.patch_applier import apply_patch
 from app.models.schemas import DocPatch, PatchChange
+from app.github.pr_manager import open_doc_pr
+from app.generation.pipeline import PipelineResult
+from app.models.schemas import DocPatch, PatchChange
+
 
 OLD_CODE = """
 def get_user(id):
@@ -508,3 +512,36 @@ def test_apply_patch_inserts_at_end_for_new_function():
     assert result.success
     assert result.new_content.strip().endswith("Creates a new user.")
     assert "Retrieves a user by ID." in result.new_content  # original content preserved
+
+def test_open_doc_pr_approved_creates_branch_commits_and_opens_normal_pr():
+    approved_patch = DocPatch(changes=[PatchChange(
+        action="replace", target_anchor="get_user",
+        old_text="Retrieves a user by ID.",
+        new_text="Retrieves a user by ID, optionally including soft-deleted users.",
+    )])
+    result = PipelineResult(status="approved", patch=approved_patch, attempts=1)
+
+    with mock_patch("app.github.pr_manager.create_branch") as m_branch, \
+         mock_patch("app.github.pr_manager.commit_file") as m_commit, \
+         mock_patch("app.github.pr_manager.open_pull_request") as m_pr, \
+         mock_patch("app.github.repo_reader.fetch_file_content",
+                     return_value="Retrieves a user by ID. Other stuff."), \
+         mock_patch("app.github.patch_applier.apply_patch") as m_apply:
+
+        from app.github.patch_applier import ApplyResult
+        m_apply.return_value = ApplyResult(
+            success=True,
+            new_content="Retrieves a user by ID, optionally including soft-deleted users. Other stuff.",
+        )
+
+        open_doc_pr(
+            owner="me", repo="myrepo", base_branch="main",
+            file_path="README.md", function_name="get_user", result=result,
+        )
+
+    m_branch.assert_called_once()
+    m_commit.assert_called_once()
+    m_pr.assert_called_once()
+
+    _, pr_kwargs = m_pr.call_args
+    assert pr_kwargs["draft"] is False
