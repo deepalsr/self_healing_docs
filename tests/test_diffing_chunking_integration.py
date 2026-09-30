@@ -17,6 +17,8 @@ from app.models.schemas import DocPatch, PatchChange
 from unittest.mock import patch as mock_patch
 from app.generation.pipeline import generate_verified_patch, MAX_ATTEMPTS
 from app.models.schemas import DocPatch, PatchChange
+from app.github.patch_applier import apply_patch
+from app.models.schemas import DocPatch, PatchChange
 
 OLD_CODE = """
 def get_user(id):
@@ -458,3 +460,51 @@ def test_pipeline_escalates_to_human_review_after_max_attempts():
     assert result.patch is None
     assert result.attempts == MAX_ATTEMPTS
     assert "not found verbatim" in result.reason
+
+
+FULL_FILE = "# Docs\n\nRetrieves a user by ID. Returns None if missing.\n\nOther content.\n"
+
+
+def test_apply_patch_replaces_correctly():
+    patch = DocPatch(changes=[PatchChange(
+        action="replace", target_anchor="get_user",
+        old_text="Retrieves a user by ID.",
+        new_text="Retrieves a user by ID, optionally including soft-deleted users.",
+    )])
+    result = apply_patch(FULL_FILE, patch)
+    assert result.success
+    assert "optionally including soft-deleted" in result.new_content
+    assert "Returns None if missing." in result.new_content  # untouched content survives
+
+
+def test_apply_patch_fails_when_old_text_missing_from_current_file():
+    patch = DocPatch(changes=[PatchChange(
+        action="replace", target_anchor="get_user",
+        old_text="This text was never in the file.",
+        new_text="New text.",
+    )])
+    result = apply_patch(FULL_FILE, patch)
+    assert not result.success
+    assert "no longer found" in result.reason
+
+
+def test_apply_patch_fails_on_ambiguous_match_in_full_file():
+    content = "Repeated line.\n\nSome other text.\n\nRepeated line.\n"
+    patch = DocPatch(changes=[PatchChange(
+        action="replace", target_anchor="x",
+        old_text="Repeated line.", new_text="Changed.",
+    )])
+    result = apply_patch(content, patch)
+    assert not result.success
+    assert "matches 2 places" in result.reason
+
+
+def test_apply_patch_inserts_at_end_for_new_function():
+    patch = DocPatch(changes=[PatchChange(
+        action="insert", target_anchor="create_user",
+        old_text="", new_text="Creates a new user.",
+    )])
+    result = apply_patch(FULL_FILE, patch)
+    assert result.success
+    assert result.new_content.strip().endswith("Creates a new user.")
+    assert "Retrieves a user by ID." in result.new_content  # original content preserved
