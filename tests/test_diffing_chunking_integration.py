@@ -545,3 +545,29 @@ def test_open_doc_pr_approved_creates_branch_commits_and_opens_normal_pr():
 
     _, pr_kwargs = m_pr.call_args
     assert pr_kwargs["draft"] is False
+
+def test_open_doc_pr_needs_review_opens_draft_pr_with_reason():
+    result = PipelineResult(
+        status="needs_human_review", patch=None, attempts=2,
+        reason="old_text not found verbatim in the existing documentation.",
+    )
+
+    with mock_patch("app.github.pr_manager.create_branch") as m_branch, \
+         mock_patch("app.github.pr_manager.commit_file") as m_commit, \
+         mock_patch("app.github.pr_manager.open_pull_request") as m_pr, \
+         mock_patch("app.github.repo_reader.fetch_file_content",
+                     return_value="Some unchanged file content."):
+
+        open_doc_pr(
+            owner="me", repo="myrepo", base_branch="main",
+            file_path="README.md", function_name="get_user", result=result,
+        )
+
+    m_branch.assert_called_once()
+    m_commit.assert_called_once()
+    m_pr.assert_called_once()
+
+    _, pr_kwargs = m_pr.call_args
+    assert pr_kwargs["draft"] is True
+    assert "needs human review" in pr_kwargs["body"].lower()
+    assert "old_text not found verbatim" in pr_kwargs["body"]
