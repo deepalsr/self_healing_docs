@@ -22,6 +22,7 @@ from app.models.schemas import DocPatch, PatchChange
 from app.github.pr_manager import open_doc_pr
 from app.generation.pipeline import PipelineResult
 from app.models.schemas import DocPatch, PatchChange
+from app.main import process_webhook_event
 
 
 OLD_CODE = """
@@ -571,3 +572,70 @@ def test_open_doc_pr_needs_review_opens_draft_pr_with_reason():
     assert pr_kwargs["draft"] is True
     assert "needs human review" in pr_kwargs["body"].lower()
     assert "old_text not found verbatim" in pr_kwargs["body"]
+
+FAKE_PUSH_PAYLOAD = {
+    "repository": {"full_name": "me/myrepo"},
+    "before": "oldsha123",
+    "after": "newsha456",
+    "ref": "refs/heads/main",
+    "commits": [
+        {"added": [], "modified": ["src/users.py"], "removed": []},
+    ],
+}
+
+
+def test_process_webhook_event_wires_pipeline_and_opens_one_pr_per_changed_function():
+    fake_diff_result = {
+        "added": [{"name": "create_user", "signature": "def create_user(name)", "body": "..."}],
+        "deleted": [],
+        "modified": [],
+    }
+
+    fake_chunks = [
+        {
+            "chunk_id": "src/users.py::create_user",
+            "embed_text": "...",
+            "metadata": {"function_name": "create_user", "change_type": "added"},
+        },
+    ]
+
+    fake_result = PipelineResult(status="approved", patch=None, attempts=1)
+
+    with mock_patch("app.main.fetch_file_content", return_value="file content") as m_fetch, \
+         mock_patch("app.main.diff_definitions", return_value=fake_diff_result) as m_diff, \
+         mock_patch("app.main.fetch_doc_snippets_for_functions", return_value={}) as m_snippets, \
+         mock_patch("app.main.chunk_diff", return_value=fake_chunks) as m_chunk, \
+         mock_patch("app.main.sync_chunks_to_pinecone") as m_sync, \
+         mock_patch("app.main.ensure_index_exists") as m_ensure, \
+         mock_patch("app.main.retrieve_context_for_chunk", return_value={"strategy": "exact_match", "results": []}) as m_retrieve, \
+         mock_patch("app.main.generate_verified_patch", return_value=fake_result) as m_generate, \
+         mock_patch("app.main.open_doc_pr") as m_pr:
+
+        process_webhook_event(FAKE_PUSH_PAYLOAD)
+
+    m_diff.assert_called_once_with("file content", "file content")
+    m_chunk.assert_called_once()
+    m_sync.assert_called_once()
+    m_retrieve.assert_called_once()
+    m_generate.assert_called_once()
+    m_pr.assert_called_once()
+
+    _, pr_kwargs = m_pr.call_args
+    assert pr_kwargs["function_name"] == "create_user"
+    assert pr_kwargs["owner"] == "me"
+    assert pr_kwargs["repo"] == "myrepo"
+
+
+def test_process_webhook_event_skips_files_with_only_deletions():
+    fake_diff_result = {"added": [], "deleted": [{"name": "old_func", "signature": "...", "body": "..."}], "modified": []}
+
+    with mock_patch("app.main.fetch_file_content", return_value="file content"), \
+         mock_patch("app.main.diff_definitions", return_value=fake_diff_result), \
+         mock_patch("app.main.ensure_index_exists"), \
+         mock_patch("app.main.chunk_diff") as m_chunk, \
+         mock_patch("app.main.open_doc_pr") as m_pr:
+
+        process_webhook_event(FAKE_PUSH_PAYLOAD)
+
+    m_chunk.assert_not_called()  # nothing to document -- loop should `continue` before chunking
+    m_pr.assert_not_called()
