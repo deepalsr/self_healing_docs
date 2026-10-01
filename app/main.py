@@ -13,6 +13,12 @@ from app.generation.pipeline import generate_verified_patch
 from app.github.repo_reader import fetch_file_content, fetch_doc_snippets_for_functions
 from app.github.pr_manager import open_doc_pr
 
+import logging
+from app.logging_config import configure_logging
+
+configure_logging()
+logger = logging.getLogger("self_healing_docs")
+
 app = FastAPI()
 
 DOC_FILE_PATH = "README.md"  # v1: single known doc file; multi-file docs is a v2 scope
@@ -54,38 +60,55 @@ def process_webhook_event(payload: dict):
     after_sha = payload["after"]
     base_branch = payload["ref"].removeprefix("refs/heads/")
 
+    logger.info(f"Processing push: repo={owner}/{repo} after={after_sha[:7]}")
     ensure_index_exists()
 
-    for file_path in _changed_python_files(payload):
-        old_content = fetch_file_content(owner, repo, file_path, before_sha) or ""
-        new_content = fetch_file_content(owner, repo, file_path, after_sha) or ""
+    changed_files = _changed_python_files(payload)
+    logger.info(f"Changed Python files in this push: {sorted(changed_files)}")
 
-        diff_result = diff_definitions(old_content, new_content)
-        changed_names = [e["name"] for e in diff_result["added"] + diff_result["modified"]]
-        if not changed_names:
-            continue
+    for file_path in changed_files:
+        try:
+            old_content = fetch_file_content(owner, repo, file_path, before_sha) or ""
+            new_content = fetch_file_content(owner, repo, file_path, after_sha) or ""
 
-        doc_snippets = fetch_doc_snippets_for_functions(
-            owner, repo, DOC_FILE_PATH, after_sha, changed_names
-        )
-
-        chunks = chunk_diff(diff_result, file_path, doc_snippets)
-        sync_chunks_to_pinecone(chunks, namespace=repo)
-
-        for chunk in chunks:
-            if chunk["metadata"]["change_type"] == "deleted":
+            diff_result = diff_definitions(old_content, new_content)
+            changed_names = [e["name"] for e in diff_result["added"] + diff_result["modified"]]
+            if not changed_names:
+                logger.info(f"{file_path}: only deletions, skipping doc generation")
                 continue
 
-            retrieval_result = retrieve_context_for_chunk(chunk, namespace=repo)
-            result = generate_verified_patch(chunk, retrieval_result)
-            open_doc_pr(
-                owner=owner, repo=repo, base_branch=base_branch,
-                file_path=DOC_FILE_PATH,
-                function_name=chunk["metadata"]["function_name"],
-                result=result,
+            logger.info(f"{file_path}: changed functions = {changed_names}")
+
+            doc_snippets = fetch_doc_snippets_for_functions(
+                owner, repo, DOC_FILE_PATH, after_sha, changed_names
             )
+            chunks = chunk_diff(diff_result, file_path, doc_snippets)
+            sync_chunks_to_pinecone(chunks, namespace=repo)
 
+            for chunk in chunks:
+                if chunk["metadata"]["change_type"] == "deleted":
+                    continue
 
+                func_name = chunk["metadata"]["function_name"]
+                retrieval_result = retrieve_context_for_chunk(chunk, namespace=repo)
+                result = generate_verified_patch(chunk, retrieval_result)
+
+                logger.info(
+                    f"{func_name}: pipeline status={result.status} attempts={result.attempts}"
+                    + (f" reason={result.reason}" if result.reason else "")
+                )
+
+                open_doc_pr(
+                    owner=owner, repo=repo, base_branch=base_branch,
+                    file_path=DOC_FILE_PATH, function_name=func_name, result=result,
+                )
+                logger.info(f"{func_name}: PR opened (status={result.status})")
+
+        except Exception:
+            # One file's failure must not silently swallow the rest of the push,
+            # and must not vanish without a trace either -- same "fail loud"
+            # policy as the guardrail escalation, applied to the orchestrator itself.
+            logger.exception(f"Unhandled error processing {file_path} in {owner}/{repo}")
 @app.post("/webhook/github")
 async def github_webhook(
     request: Request,

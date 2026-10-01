@@ -639,3 +639,27 @@ def test_process_webhook_event_skips_files_with_only_deletions():
 
     m_chunk.assert_not_called()  # nothing to document -- loop should `continue` before chunking
     m_pr.assert_not_called()
+
+
+def test_process_webhook_event_continues_to_next_file_after_one_file_errors():
+    payload = {
+        **FAKE_PUSH_PAYLOAD,
+        "commits": [{"added": [], "modified": ["src/users.py", "src/orders.py"], "removed": []}],
+    }
+
+    call_count = {"n": 0}
+
+    def flaky_fetch(owner, repo, path, ref):
+        call_count["n"] += 1
+        if path == "src/users.py":
+            raise RuntimeError("simulated GitHub outage")
+        return "file content"
+
+    with mock_patch("app.main.fetch_file_content", side_effect=flaky_fetch), \
+         mock_patch("app.main.ensure_index_exists"), \
+         mock_patch("app.main.diff_definitions", return_value={"added": [], "deleted": [], "modified": []}), \
+         mock_patch("app.main.chunk_diff") as m_chunk:
+
+        process_webhook_event(payload)  # must not raise
+
+    assert call_count["n"] >= 2  # both files were attempted despite the first erroring
