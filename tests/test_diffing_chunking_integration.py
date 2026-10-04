@@ -24,6 +24,11 @@ from app.generation.pipeline import PipelineResult
 from app.models.schemas import DocPatch, PatchChange
 from app.main import process_webhook_event
 from app.github.doc_resolver import candidate_doc_path, resolve_doc_path
+from app.config import Settings
+from fastapi.testclient import TestClient
+from app.main import app, settings as main_settings
+
+client = TestClient(app)
 
 
 OLD_CODE = """
@@ -702,3 +707,41 @@ def test_apply_patch_falls_back_to_end_when_reference_not_found():
     result = apply_patch(content, patch, insert_reference="this text is not in the file")
     assert result.success
     assert result.new_content.strip().endswith("New content.")
+
+
+
+def test_allowed_repos_set_parses_comma_separated_list():
+    s = Settings(ALLOWED_REPOS="me/repo-a, me/repo-b ,me/repo-c")
+    assert s.allowed_repos_set() == {"me/repo-a", "me/repo-b", "me/repo-c"}
+
+
+def test_allowed_repos_set_empty_string_means_no_restriction():
+    s = Settings(ALLOWED_REPOS="")
+    assert s.allowed_repos_set() == set()
+
+def test_webhook_rejects_non_allowlisted_repo(monkeypatch):
+    monkeypatch.setattr(main_settings, "WEBHOOK_SECRET", "test-secret-for-this-test")
+    monkeypatch.setattr(main_settings, "ALLOWED_REPOS", "someoneelse/theirrepo")
+
+    import json
+    payload = json.dumps({
+        "repository": {"full_name": "me/myrepo"},
+        "ref": "refs/heads/main",
+    }).encode()
+
+    import hmac, hashlib
+    sig = "sha256=" + hmac.new(
+        key=b"test-secret-for-this-test",
+        msg=payload, digestmod=hashlib.sha256
+    ).hexdigest()
+
+    response = client.post(
+        "/webhook/github",
+        content=payload,
+        headers={
+            "X-Hub-Signature-256": sig,
+            "X-GitHub-Event": "push",
+            "Content-Type": "application/json",
+        },
+    )
+    assert response.status_code == 403
