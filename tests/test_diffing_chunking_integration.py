@@ -720,6 +720,7 @@ def test_allowed_repos_set_empty_string_means_no_restriction():
     assert s.allowed_repos_set() == set()
 
 def test_webhook_rejects_non_allowlisted_repo(monkeypatch):
+    monkeypatch.setattr(main_settings, "WEBHOOK_SECRET", "test-secret-for-this-test")
     monkeypatch.setattr(main_settings, "ALLOWED_REPOS", "someoneelse/theirrepo")
 
     import json
@@ -730,7 +731,7 @@ def test_webhook_rejects_non_allowlisted_repo(monkeypatch):
 
     import hmac, hashlib
     sig = "sha256=" + hmac.new(
-        key=main_settings.WEBHOOK_SECRET.encode() or b"test-secret",
+        key=b"test-secret-for-this-test",
         msg=payload, digestmod=hashlib.sha256
     ).hexdigest()
 
