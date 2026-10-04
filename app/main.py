@@ -12,6 +12,7 @@ from app.retrieval.retriever import retrieve_context_for_chunk
 from app.generation.pipeline import generate_verified_patch
 from app.github.repo_reader import fetch_file_content, fetch_doc_snippets_for_functions
 from app.github.pr_manager import open_doc_pr
+from app.github.doc_resolver import resolve_doc_path
 
 import logging
 from app.logging_config import configure_logging
@@ -20,8 +21,6 @@ configure_logging()
 logger = logging.getLogger("self_healing_docs")
 
 app = FastAPI()
-
-DOC_FILE_PATH = "README.md"  # v1: single known doc file; multi-file docs is a v2 scope
 
 
 def verify_signature(payload_body: bytes, signature_header: str) -> bool:
@@ -77,10 +76,11 @@ def process_webhook_event(payload: dict):
                 logger.info(f"{file_path}: only deletions, skipping doc generation")
                 continue
 
-            logger.info(f"{file_path}: changed functions = {changed_names}")
+            doc_path = resolve_doc_path(owner, repo, file_path, after_sha)
+            logger.info(f"{file_path}: changed functions = {changed_names}, doc target = {doc_path}")
 
             doc_snippets = fetch_doc_snippets_for_functions(
-                owner, repo, DOC_FILE_PATH, after_sha, changed_names
+                owner, repo, doc_path, after_sha, changed_names
             )
             chunks = chunk_diff(diff_result, file_path, doc_snippets)
             sync_chunks_to_pinecone(chunks, namespace=repo)
@@ -100,7 +100,8 @@ def process_webhook_event(payload: dict):
 
                 open_doc_pr(
                     owner=owner, repo=repo, base_branch=base_branch,
-                    file_path=DOC_FILE_PATH, function_name=func_name, result=result,
+                    file_path=doc_path,
+                    function_name=func_name, result=result,
                 )
                 logger.info(f"{func_name}: PR opened (status={result.status})")
 
@@ -109,6 +110,8 @@ def process_webhook_event(payload: dict):
             # and must not vanish without a trace either -- same "fail loud"
             # policy as the guardrail escalation, applied to the orchestrator itself.
             logger.exception(f"Unhandled error processing {file_path} in {owner}/{repo}")
+
+
 @app.post("/webhook/github")
 async def github_webhook(
     request: Request,
