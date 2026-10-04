@@ -604,6 +604,7 @@ def test_process_webhook_event_wires_pipeline_and_opens_one_pr_per_changed_funct
 
     with mock_patch("app.main.fetch_file_content", return_value="file content") as m_fetch, \
          mock_patch("app.main.diff_definitions", return_value=fake_diff_result) as m_diff, \
+         mock_patch("app.main.resolve_doc_path", return_value="README.md") as m_resolve, \
          mock_patch("app.main.fetch_doc_snippets_for_functions", return_value={}) as m_snippets, \
          mock_patch("app.main.chunk_diff", return_value=fake_chunks) as m_chunk, \
          mock_patch("app.main.sync_chunks_to_pinecone") as m_sync, \
