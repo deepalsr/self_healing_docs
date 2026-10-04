@@ -679,3 +679,25 @@ def test_resolve_doc_path_uses_module_doc_when_it_exists():
 def test_resolve_doc_path_falls_back_to_readme_when_module_doc_missing():
     with mock_patch("app.github.doc_resolver.fetch_file_content", return_value=None):
         assert resolve_doc_path("me", "repo", "src/ingest.py", "main") == "README.md"
+
+def test_apply_patch_inserts_near_reference_when_found():
+    content = "# Docs\n\nfetch_order retrieves an order by id.\n\nOther section.\n"
+    patch = DocPatch(changes=[PatchChange(
+        action="insert", target_anchor="fetch_customer",
+        old_text="", new_text="fetch_customer retrieves a customer by id.",
+    )])
+    result = apply_patch(content, patch, insert_reference="fetch_order retrieves an order by id.")
+    assert result.success
+    # inserted right after the reference paragraph, before "Other section."
+    assert result.new_content.index("fetch_customer") < result.new_content.index("Other section.")
+    assert "fetch_order retrieves an order by id." in result.new_content  # untouched
+
+
+def test_apply_patch_falls_back_to_end_when_reference_not_found():
+    content = "# Docs\n\nSome content.\n"
+    patch = DocPatch(changes=[PatchChange(
+        action="insert", target_anchor="x", old_text="", new_text="New content.",
+    )])
+    result = apply_patch(content, patch, insert_reference="this text is not in the file")
+    assert result.success
+    assert result.new_content.strip().endswith("New content.")
