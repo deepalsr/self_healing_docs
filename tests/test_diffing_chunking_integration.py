@@ -23,6 +23,7 @@ from app.github.pr_manager import open_doc_pr
 from app.generation.pipeline import PipelineResult
 from app.models.schemas import DocPatch, PatchChange
 from app.main import process_webhook_event
+from app.github.doc_resolver import candidate_doc_path, resolve_doc_path
 
 
 OLD_CODE = """
@@ -663,3 +664,18 @@ def test_process_webhook_event_continues_to_next_file_after_one_file_errors():
         process_webhook_event(payload)  # must not raise
 
     assert call_count["n"] >= 2  # both files were attempted despite the first erroring
+
+
+def test_candidate_doc_path_maps_source_file_to_docs_folder():
+    assert candidate_doc_path("src/ingest.py") == "docs/ingest.md"
+    assert candidate_doc_path("app/auth/login.py") == "docs/login.md"
+
+
+def test_resolve_doc_path_uses_module_doc_when_it_exists():
+    with mock_patch("app.github.doc_resolver.fetch_file_content", return_value="# ingest docs"):
+        assert resolve_doc_path("me", "repo", "src/ingest.py", "main") == "docs/ingest.md"
+
+
+def test_resolve_doc_path_falls_back_to_readme_when_module_doc_missing():
+    with mock_patch("app.github.doc_resolver.fetch_file_content", return_value=None):
+        assert resolve_doc_path("me", "repo", "src/ingest.py", "main") == "README.md"
