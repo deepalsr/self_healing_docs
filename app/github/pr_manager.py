@@ -67,12 +67,8 @@ def open_pull_request(
 def open_doc_pr(
     owner: str, repo: str, base_branch: str,
     file_path: str, function_name: str, result: PipelineResult,
+    insert_reference: str | None = None,
 ) -> dict | None:
-    """
-    Takes a PipelineResult and produces the appropriate PR.
-    Approved -> normal PR. Needs review -> draft PR carrying the reason.
-    Returns None only if there's genuinely nothing to commit.
-    """
     branch = f"docs-update/{function_name}-{int(time.time())}"
     create_branch(owner, repo, base_branch, branch)
 
@@ -81,7 +77,7 @@ def open_doc_pr(
         from app.github.patch_applier import apply_patch
 
         current_content = fetch_file_content(owner, repo, file_path, branch)
-        apply_result = apply_patch(current_content, result.patch)
+        apply_result = apply_patch(current_content, result.patch, insert_reference=insert_reference)
 
         if not apply_result.success:
             # The file changed between generation and apply -- escalate,

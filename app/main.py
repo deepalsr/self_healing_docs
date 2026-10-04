@@ -93,6 +93,15 @@ def process_webhook_event(payload: dict):
                 retrieval_result = retrieve_context_for_chunk(chunk, namespace=repo)
                 result = generate_verified_patch(chunk, retrieval_result)
 
+                # For a genuinely new function (insert, not replace), Tier 2's
+                # similarity match -- if one exists -- tells us where in the
+                # file this new content belongs, instead of always appending
+                # at the end. Tier 1 (exact match) means an existing section
+                # is being replaced, so there's no "near" to compute.
+                insert_reference = None
+                if retrieval_result["strategy"] == "similarity_fallback" and retrieval_result["results"]:
+                    insert_reference = retrieval_result["results"][0]["metadata"].get("doc_snippet")
+
                 logger.info(
                     f"{func_name}: pipeline status={result.status} attempts={result.attempts}"
                     + (f" reason={result.reason}" if result.reason else "")
@@ -102,6 +111,7 @@ def process_webhook_event(payload: dict):
                     owner=owner, repo=repo, base_branch=base_branch,
                     file_path=doc_path,
                     function_name=func_name, result=result,
+                    insert_reference=insert_reference,
                 )
                 logger.info(f"{func_name}: PR opened (status={result.status})")
 
