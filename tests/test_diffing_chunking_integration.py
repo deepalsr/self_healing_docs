@@ -122,14 +122,14 @@ def test_deleted_chunks_are_never_upserted():
     delete_names = [c["metadata"]["function_name"] for c in to_delete]
     assert "delete_user" in delete_names
 
-
+@pytest.mark.integration
 def test_embed_text_returns_correct_dimension():
     vector = embed_text("def get_user(id): return db.query(id)")
     assert isinstance(vector, list)
     assert len(vector) == EMBEDDING_DIMENSION
     assert all(isinstance(x, float) for x in vector)
 
-
+@pytest.mark.integration
 def test_sync_chunks_to_pinecone_upserts_and_deletes():
     ensure_index_exists()
     index = get_index()
@@ -162,7 +162,7 @@ def test_sync_chunks_to_pinecone_upserts_and_deletes():
             namespace=TEST_NAMESPACE,
         )
 
-
+@pytest.mark.integration
 def test_retrieve_context_finds_exact_match_when_chunk_exists():
     index = get_index()
 
@@ -191,7 +191,7 @@ def test_retrieve_context_finds_exact_match_when_chunk_exists():
     finally:
         index.delete(ids=["fake_file.py::existing_function"], namespace=TEST_NAMESPACE)
 
-
+@pytest.mark.integration
 def test_retrieve_context_falls_back_to_similarity_when_no_exact_match():
     index = get_index()
 
