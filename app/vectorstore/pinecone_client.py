@@ -4,19 +4,22 @@ from pinecone import Pinecone, ServerlessSpec
 from app.config import settings
 from app.embeddings.embedder import embed_text, EMBEDDING_DIMENSION
 
-pc = Pinecone(api_key=settings.PINECONE_API_KEY)
-
 INDEX_NAME = "self-healing-docs"
+
+_pc = None
+
+
+def _get_pc():
+    global _pc
+    if _pc is None:
+        _pc = Pinecone(api_key=settings.PINECONE_API_KEY)
+    return _pc
 
 
 def ensure_index_exists():
-    """
-    Creates the Pinecone index if it doesn't already exist.
-    Idempotent -- safe to call every time the app starts.
-    """
-    existing_indexes = [idx["name"] for idx in pc.list_indexes()]
+    existing_indexes = [idx["name"] for idx in _get_pc().list_indexes()]
     if INDEX_NAME not in existing_indexes:
-        pc.create_index(
+        _get_pc().create_index(
             name=INDEX_NAME,
             dimension=EMBEDDING_DIMENSION,
             metric="cosine",
@@ -25,7 +28,7 @@ def ensure_index_exists():
 
 
 def get_index():
-    return pc.Index(INDEX_NAME)
+    return _get_pc().Index(INDEX_NAME)
 
 
 def upsert_chunks(chunks: list[dict], namespace: str):
