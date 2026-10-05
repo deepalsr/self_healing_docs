@@ -69,53 +69,50 @@ def open_doc_pr(
     file_path: str, function_name: str, result: PipelineResult,
     insert_reference: str | None = None,
 ) -> dict | None:
+    if result.status == "needs_human_review":
+        return create_issue(
+            owner, repo,
+            title=f"[Needs review] Docs update for {function_name}",
+            body=(
+                f"⚠️ Automated documentation generation could not produce a "
+                f"verified patch for `{function_name}` in `{file_path}` after "
+                f"{result.attempts} attempts.\n\n"
+                f"Last rejection reason: {result.reason}"
+            ),
+        )
+
+    # status == "approved" -- unchanged branch/commit/PR flow
     branch = f"docs-update/{function_name}-{int(time.time())}"
     create_branch(owner, repo, base_branch, branch)
 
-    if result.status == "approved":
-        from app.github.repo_reader import fetch_file_content
-        from app.github.patch_applier import apply_patch
-
-        current_content = fetch_file_content(owner, repo, file_path, branch)
-        apply_result = apply_patch(current_content, result.patch, insert_reference=insert_reference)
-
-        if not apply_result.success:
-            # The file changed between generation and apply -- escalate,
-            # don't silently give up. Same "fail loud" policy as everywhere else.
-            body = (
-                f"⚠️ Needs human review — automated apply failed after generation succeeded.\n\n"
-                f"Reason: {apply_result.reason}"
-            )
-            commit_file(owner, repo, branch, file_path, current_content,
-                        f"docs: attempted update for {function_name} (apply failed)")
-            return open_pull_request(
-                owner, repo, base_branch, branch,
-                title=f"[Needs review] Docs update for {function_name}",
-                body=body, draft=True,
-            )
-
-        commit_file(owner, repo, branch, file_path, apply_result.new_content,
-                    f"docs: update {function_name} documentation")
-        return open_pull_request(
-            owner, repo, base_branch, branch,
-            title=f"Update docs for {function_name}",
-            body=f"Automated documentation update for `{function_name}`.\n\nVerified attempts: {result.attempts}.",
-            draft=False,
-        )
-
-    # status == "needs_human_review"
     from app.github.repo_reader import fetch_file_content
+    from app.github.patch_applier import apply_patch
 
     current_content = fetch_file_content(owner, repo, file_path, branch)
-    commit_file(owner, repo, branch, file_path, current_content,
-                f"docs: no automated update generated for {function_name} (needs review)")
+    apply_result = apply_patch(current_content, result.patch, insert_reference=insert_reference)
+
+    if not apply_result.success:
+        body = (
+            f"⚠️ Needs human review — automated apply failed after generation succeeded.\n\n"
+            f"Reason: {apply_result.reason}"
+        )
+        commit_file(owner, repo, branch, file_path, current_content,
+                    f"docs: attempted update for {function_name} (apply failed)")
+        return open_pull_request(
+            owner, repo, base_branch, branch,
+            title=f"[Needs review] Docs update for {function_name}",
+            body=body, draft=True,
+        )
+
+    commit_file(owner, repo, branch, file_path, apply_result.new_content,
+                f"docs: update {function_name} documentation")
     return open_pull_request(
         owner, repo, base_branch, branch,
-        title=f"[Needs review] Docs update for {function_name}",
-        body=(
-            f"⚠️ Needs human review — automated generation could not produce a "
-            f"verified patch after {result.attempts} attempts.\n\n"
-            f"Last rejection reason: {result.reason}"
-        ),
-        draft=True,
+        title=f"Update docs for {function_name}",
+        body=f"Automated documentation update for `{function_name}`.\n\nVerified attempts: {result.attempts}.",
+        draft=False,
     )
+
+def create_issue(owner: str, repo: str, title: str, body: str) -> dict:
+    resp = _post(owner, repo, "issues", {"title": title, "body": body})
+    return resp.json()

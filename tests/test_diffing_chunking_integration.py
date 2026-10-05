@@ -15,13 +15,9 @@ from app.generation.patch_generator import build_prompt, parse_patch, PatchParse
 from app.guardrails import check_grounding, check_scope
 from app.models.schemas import DocPatch, PatchChange
 from unittest.mock import patch as mock_patch
-from app.generation.pipeline import generate_verified_patch, MAX_ATTEMPTS
-from app.models.schemas import DocPatch, PatchChange
+from app.generation.pipeline import generate_verified_patch, MAX_ATTEMPTS, PipelineResult
 from app.github.patch_applier import apply_patch
-from app.models.schemas import DocPatch, PatchChange
 from app.github.pr_manager import open_doc_pr
-from app.generation.pipeline import PipelineResult
-from app.models.schemas import DocPatch, PatchChange
 from app.main import process_webhook_event
 from app.github.doc_resolver import candidate_doc_path, resolve_doc_path
 from app.config import Settings
@@ -72,6 +68,10 @@ Create a `.env` file in the project root.
 """
 
 
+# ---------------------------------------------------------------------------
+# Diffing
+# ---------------------------------------------------------------------------
+
 def test_diff_detects_added_function():
     result = diff_definitions(OLD_CODE, NEW_CODE)
     added_names = [e["name"] for e in result["added"]]
@@ -90,6 +90,10 @@ def test_diff_detects_modified_function_with_both_changes():
     assert "get_user" in modified
     assert modified["get_user"]["change_type"] == "both"
 
+
+# ---------------------------------------------------------------------------
+# Chunking
+# ---------------------------------------------------------------------------
 
 def test_chunk_embed_text_includes_new_body_for_modified():
     diff_result = diff_definitions(OLD_CODE, NEW_CODE)
@@ -127,12 +131,31 @@ def test_deleted_chunks_are_never_upserted():
     delete_names = [c["metadata"]["function_name"] for c in to_delete]
     assert "delete_user" in delete_names
 
+
+def test_chunk_includes_doc_snippet_when_provided():
+    diff_result = diff_definitions(OLD_CODE, NEW_CODE)
+    doc_snippets = {"get_user": "Existing docs: fetches a user by id."}
+
+    chunks = chunk_diff(diff_result, "fake_file.py", doc_snippets)
+
+    get_user_chunk = next(c for c in chunks if c["metadata"]["function_name"] == "get_user")
+    create_user_chunk = next(c for c in chunks if c["metadata"]["function_name"] == "create_user")
+
+    assert get_user_chunk["metadata"]["doc_snippet"] == "Existing docs: fetches a user by id."
+    assert "doc_snippet" not in create_user_chunk["metadata"]
+
+
+# ---------------------------------------------------------------------------
+# Embeddings + Pinecone (real network calls)
+# ---------------------------------------------------------------------------
+
 @pytest.mark.integration
 def test_embed_text_returns_correct_dimension():
     vector = embed_text("def get_user(id): return db.query(id)")
     assert isinstance(vector, list)
     assert len(vector) == EMBEDDING_DIMENSION
     assert all(isinstance(x, float) for x in vector)
+
 
 @pytest.mark.integration
 def test_sync_chunks_to_pinecone_upserts_and_deletes():
@@ -167,6 +190,7 @@ def test_sync_chunks_to_pinecone_upserts_and_deletes():
             namespace=TEST_NAMESPACE,
         )
 
+
 @pytest.mark.integration
 def test_retrieve_context_finds_exact_match_when_chunk_exists():
     index = get_index()
@@ -195,6 +219,7 @@ def test_retrieve_context_finds_exact_match_when_chunk_exists():
 
     finally:
         index.delete(ids=["fake_file.py::existing_function"], namespace=TEST_NAMESPACE)
+
 
 @pytest.mark.integration
 def test_retrieve_context_falls_back_to_similarity_when_no_exact_match():
@@ -255,6 +280,10 @@ def test_retrieve_context_falls_back_to_similarity_when_no_exact_match():
         )
 
 
+# ---------------------------------------------------------------------------
+# Doc section extraction
+# ---------------------------------------------------------------------------
+
 def test_extract_doc_section_finds_paragraph_mention_when_no_anchor_or_heading():
     result = extract_doc_section(SAMPLE_README, "ingest")
     assert result is not None
@@ -287,17 +316,9 @@ def test_extract_doc_section_prefers_anchor_tag_when_present():
     assert "Deleting a user" not in result
 
 
-def test_chunk_includes_doc_snippet_when_provided():
-    diff_result = diff_definitions(OLD_CODE, NEW_CODE)
-    doc_snippets = {"get_user": "Existing docs: fetches a user by id."}
-
-    chunks = chunk_diff(diff_result, "fake_file.py", doc_snippets)
-
-    get_user_chunk = next(c for c in chunks if c["metadata"]["function_name"] == "get_user")
-    create_user_chunk = next(c for c in chunks if c["metadata"]["function_name"] == "create_user")
-
-    assert get_user_chunk["metadata"]["doc_snippet"] == "Existing docs: fetches a user by id."
-    assert "doc_snippet" not in create_user_chunk["metadata"]
+# ---------------------------------------------------------------------------
+# Prompt construction + patch parsing
+# ---------------------------------------------------------------------------
 
 GEN_CHUNK = {
     "chunk_id": "f.py::get_user",
@@ -341,6 +362,11 @@ def test_parse_patch_rejects_bad_json_and_bad_action():
     with pytest.raises(PatchParseError):
         parse_patch('{"changes": [{"action": "delete_everything", "target_anchor": "x", "old_text": "", "new_text": ""}]}')
 
+
+# ---------------------------------------------------------------------------
+# Guardrails: Layer 1 (grounding) + Layer 2 (scope)
+# ---------------------------------------------------------------------------
+
 DOC = "Retrieves a user by ID. Returns None if missing."
 
 
@@ -383,6 +409,7 @@ def test_grounding_accepts_insert_for_undocumented_function():
 def test_grounding_rejects_noop_patch():
     assert not check_grounding(_patch(new="Retrieves a user by ID."), DOC).passed
 
+
 def test_scope_passes_when_anchor_is_allowed():
     assert check_scope(_patch(), {"get_user"}).passed
 
@@ -403,6 +430,11 @@ def test_scope_rejects_when_patch_touches_multiple_anchors_one_unauthorized():
     result = check_scope(patch, {"get_user"})
     assert not result.passed
     assert "delete_user" in result.reason
+
+
+# ---------------------------------------------------------------------------
+# Generation pipeline: retry + escalation (mocked)
+# ---------------------------------------------------------------------------
 
 PIPE_CHUNK = {
     "chunk_id": "f.py::get_user",
@@ -473,6 +505,10 @@ def test_pipeline_escalates_to_human_review_after_max_attempts():
     assert "not found verbatim" in result.reason
 
 
+# ---------------------------------------------------------------------------
+# Patch application
+# ---------------------------------------------------------------------------
+
 FULL_FILE = "# Docs\n\nRetrieves a user by ID. Returns None if missing.\n\nOther content.\n"
 
 
@@ -520,6 +556,34 @@ def test_apply_patch_inserts_at_end_for_new_function():
     assert result.new_content.strip().endswith("Creates a new user.")
     assert "Retrieves a user by ID." in result.new_content  # original content preserved
 
+
+def test_apply_patch_inserts_near_reference_when_found():
+    content = "# Docs\n\nfetch_order retrieves an order by id.\n\nOther section.\n"
+    patch = DocPatch(changes=[PatchChange(
+        action="insert", target_anchor="fetch_customer",
+        old_text="", new_text="fetch_customer retrieves a customer by id.",
+    )])
+    result = apply_patch(content, patch, insert_reference="fetch_order retrieves an order by id.")
+    assert result.success
+    # inserted right after the reference paragraph, before "Other section."
+    assert result.new_content.index("fetch_customer") < result.new_content.index("Other section.")
+    assert "fetch_order retrieves an order by id." in result.new_content  # untouched
+
+
+def test_apply_patch_falls_back_to_end_when_reference_not_found():
+    content = "# Docs\n\nSome content.\n"
+    patch = DocPatch(changes=[PatchChange(
+        action="insert", target_anchor="x", old_text="", new_text="New content.",
+    )])
+    result = apply_patch(content, patch, insert_reference="this text is not in the file")
+    assert result.success
+    assert result.new_content.strip().endswith("New content.")
+
+
+# ---------------------------------------------------------------------------
+# PR / Issue creation
+# ---------------------------------------------------------------------------
+
 def test_open_doc_pr_approved_creates_branch_commits_and_opens_normal_pr():
     approved_patch = DocPatch(changes=[PatchChange(
         action="replace", target_anchor="get_user",
@@ -553,7 +617,8 @@ def test_open_doc_pr_approved_creates_branch_commits_and_opens_normal_pr():
     _, pr_kwargs = m_pr.call_args
     assert pr_kwargs["draft"] is False
 
-def test_open_doc_pr_needs_review_opens_draft_pr_with_reason():
+
+def test_open_doc_pr_needs_review_creates_issue_not_pr():
     result = PipelineResult(
         status="needs_human_review", patch=None, attempts=2,
         reason="old_text not found verbatim in the existing documentation.",
@@ -562,22 +627,50 @@ def test_open_doc_pr_needs_review_opens_draft_pr_with_reason():
     with mock_patch("app.github.pr_manager.create_branch") as m_branch, \
          mock_patch("app.github.pr_manager.commit_file") as m_commit, \
          mock_patch("app.github.pr_manager.open_pull_request") as m_pr, \
-         mock_patch("app.github.repo_reader.fetch_file_content",
-                     return_value="Some unchanged file content."):
+         mock_patch("app.github.pr_manager.create_issue") as m_issue:
 
         open_doc_pr(
             owner="me", repo="myrepo", base_branch="main",
             file_path="README.md", function_name="get_user", result=result,
         )
 
-    m_branch.assert_called_once()
-    m_commit.assert_called_once()
-    m_pr.assert_called_once()
+    m_branch.assert_not_called()
+    m_commit.assert_not_called()
+    m_pr.assert_not_called()
+    m_issue.assert_called_once()
 
+    _, issue_kwargs = m_issue.call_args
+    assert "needs review" in issue_kwargs["title"].lower()
+    assert "old_text not found verbatim" in issue_kwargs["body"]
+
+
+def test_open_doc_pr_apply_failure_still_opens_draft_pr_not_issue():
+    approved_patch = DocPatch(changes=[PatchChange(
+        action="replace", target_anchor="get_user",
+        old_text="text that will not be found", new_text="new text",
+    )])
+    result = PipelineResult(status="approved", patch=approved_patch, attempts=1)
+
+    with mock_patch("app.github.pr_manager.create_branch") as m_branch, \
+         mock_patch("app.github.pr_manager.commit_file") as m_commit, \
+         mock_patch("app.github.pr_manager.open_pull_request") as m_pr, \
+         mock_patch("app.github.pr_manager.create_issue") as m_issue, \
+         mock_patch("app.github.repo_reader.fetch_file_content", return_value="unrelated content"):
+
+        open_doc_pr(
+            owner="me", repo="myrepo", base_branch="main",
+            file_path="README.md", function_name="get_user", result=result,
+        )
+
+    m_issue.assert_not_called()
+    m_pr.assert_called_once()
     _, pr_kwargs = m_pr.call_args
     assert pr_kwargs["draft"] is True
-    assert "needs human review" in pr_kwargs["body"].lower()
-    assert "old_text not found verbatim" in pr_kwargs["body"]
+
+
+# ---------------------------------------------------------------------------
+# Webhook glue (full orchestration, mocked collaborators)
+# ---------------------------------------------------------------------------
 
 FAKE_PUSH_PAYLOAD = {
     "repository": {"full_name": "me/myrepo"},
@@ -672,6 +765,10 @@ def test_process_webhook_event_continues_to_next_file_after_one_file_errors():
     assert call_count["n"] >= 2  # both files were attempted despite the first erroring
 
 
+# ---------------------------------------------------------------------------
+# Doc path resolution (multi-file docs)
+# ---------------------------------------------------------------------------
+
 def test_candidate_doc_path_maps_source_file_to_docs_folder():
     assert candidate_doc_path("src/ingest.py") == "docs/ingest.md"
     assert candidate_doc_path("app/auth/login.py") == "docs/login.md"
@@ -686,29 +783,10 @@ def test_resolve_doc_path_falls_back_to_readme_when_module_doc_missing():
     with mock_patch("app.github.doc_resolver.fetch_file_content", return_value=None):
         assert resolve_doc_path("me", "repo", "src/ingest.py", "main") == "README.md"
 
-def test_apply_patch_inserts_near_reference_when_found():
-    content = "# Docs\n\nfetch_order retrieves an order by id.\n\nOther section.\n"
-    patch = DocPatch(changes=[PatchChange(
-        action="insert", target_anchor="fetch_customer",
-        old_text="", new_text="fetch_customer retrieves a customer by id.",
-    )])
-    result = apply_patch(content, patch, insert_reference="fetch_order retrieves an order by id.")
-    assert result.success
-    # inserted right after the reference paragraph, before "Other section."
-    assert result.new_content.index("fetch_customer") < result.new_content.index("Other section.")
-    assert "fetch_order retrieves an order by id." in result.new_content  # untouched
 
-
-def test_apply_patch_falls_back_to_end_when_reference_not_found():
-    content = "# Docs\n\nSome content.\n"
-    patch = DocPatch(changes=[PatchChange(
-        action="insert", target_anchor="x", old_text="", new_text="New content.",
-    )])
-    result = apply_patch(content, patch, insert_reference="this text is not in the file")
-    assert result.success
-    assert result.new_content.strip().endswith("New content.")
-
-
+# ---------------------------------------------------------------------------
+# Per-repo allowlist
+# ---------------------------------------------------------------------------
 
 def test_allowed_repos_set_parses_comma_separated_list():
     s = Settings(ALLOWED_REPOS="me/repo-a, me/repo-b ,me/repo-c")
@@ -718,6 +796,7 @@ def test_allowed_repos_set_parses_comma_separated_list():
 def test_allowed_repos_set_empty_string_means_no_restriction():
     s = Settings(ALLOWED_REPOS="")
     assert s.allowed_repos_set() == set()
+
 
 def test_webhook_rejects_non_allowlisted_repo(monkeypatch):
     monkeypatch.setattr(main_settings, "WEBHOOK_SECRET", "test-secret-for-this-test")
