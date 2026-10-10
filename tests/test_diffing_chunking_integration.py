@@ -1,7 +1,7 @@
 # tests/test_diffing_chunking_integration.py
 import pytest
 from app.diffing.ast_parser import extract_definitions, diff_definitions, detect_renames
-from app.chunking.chunker import chunk_diff
+from app.chunking.chunker import chunk_diff, build_chunk
 from app.embeddings.embedder import embed_text, EMBEDDING_DIMENSION
 from app.vectorstore.pinecone_client import (
     ensure_index_exists,
@@ -941,3 +941,34 @@ def test_detect_renames_claims_best_match_and_leaves_others_unmatched():
     # The loser falls back to a plain deletion — never forced into a wrong match.
     assert still_deleted == {"notify_user_old"}
     assert still_added == set()
+
+def test_build_chunk_renamed_uses_new_name_for_chunk_id_and_old_name_for_metadata():
+    entry = {
+        "old_name": "get_user",
+        "new_name": "fetch_user",
+        "similarity": 1.0,
+        "old_signature": "def get_user(user_id):",
+        "new_signature": "def fetch_user(user_id):",
+        "old_body": "    return db.get(user_id)",
+        "new_body": "    return db.get(user_id)",
+        "change_type": "none",
+    }
+
+    chunk = build_chunk(entry, "renamed", "src/users.py", "Existing docs for get_user...")
+
+    # chunk_id is forward-looking: built from new_name, since that's the
+    # function's permanent identity going forward (Tier 1 retrieval will
+    # look it up this way on the NEXT push).
+    assert chunk["chunk_id"] == "src/users.py::fetch_user"
+    assert chunk["metadata"]["function_name"] == "fetch_user"
+
+    # old_name and old_chunk_id are preserved so the doc patch can find the
+    # EXISTING doc section (still written under the old name) and so
+    # Pinecone sync can clean up the stale old vector.
+    assert chunk["metadata"]["old_name"] == "get_user"
+    assert chunk["metadata"]["old_chunk_id"] == "src/users.py::get_user"
+
+    # embed_text reflects the CURRENT state (new signature/body), since
+    # that's what should drive future semantic retrieval.
+    assert "fetch_user" in chunk["embed_text"]
+    assert chunk["metadata"]["doc_snippet"] == "Existing docs for get_user..."
