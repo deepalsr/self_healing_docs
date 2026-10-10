@@ -152,26 +152,3 @@ async def github_webhook(
 
     return {"status": "accepted"}
 
-@app.post("/webhook/github")
-async def github_webhook(
-    request: Request,
-    background_tasks: BackgroundTasks,
-    x_hub_signature_256: str = Header(None),
-    x_github_event: str = Header(None),
-):
-    payload_body = await request.body()
-
-    if not verify_signature(payload_body, x_hub_signature_256):
-        raise HTTPException(status_code=401, detail="Invalid signature")
-
-    if x_github_event != "push":
-        return {"status": "ignored", "reason": f"event type '{x_github_event}' not handled"}
-
-    payload = await request.json()
-
-    if payload.get("ref") != "refs/heads/main":
-        return {"status": "ignored", "reason": "not the main branch"}
-
-    background_tasks.add_task(process_webhook_event, payload)
-
-    return {"status": "accepted"}
