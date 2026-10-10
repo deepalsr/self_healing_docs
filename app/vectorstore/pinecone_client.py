@@ -75,7 +75,10 @@ def split_chunks_by_action(chunks: list[dict]) -> tuple[list[dict], list[dict]]:
 def sync_chunks_to_pinecone(chunks: list[dict], namespace: str):
     """
     Single entry point for syncing a diff's chunks to Pinecone.
-    Routes added/modified chunks to upsert, deleted chunks to delete.
+    Routes added/modified/renamed chunks to upsert, deleted chunks to
+    delete. A renamed chunk is upserted under its NEW chunk_id, then its
+    OLD chunk_id (carried in metadata) is explicitly deleted too, so a
+    rename never leaves a stale vector behind under the old name.
     Always call this instead of upsert_chunks/delete_chunk directly.
     """
     to_upsert, to_delete = split_chunks_by_action(chunks)
@@ -85,3 +88,8 @@ def sync_chunks_to_pinecone(chunks: list[dict], namespace: str):
 
     for chunk in to_delete:
         delete_chunk(chunk["chunk_id"], namespace)
+
+    for chunk in to_upsert:
+        old_chunk_id = chunk["metadata"].get("old_chunk_id")
+        if old_chunk_id:
+            delete_chunk(old_chunk_id, namespace)

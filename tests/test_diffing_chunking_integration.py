@@ -972,3 +972,34 @@ def test_build_chunk_renamed_uses_new_name_for_chunk_id_and_old_name_for_metadat
     # that's what should drive future semantic retrieval.
     assert "fetch_user" in chunk["embed_text"]
     assert chunk["metadata"]["doc_snippet"] == "Existing docs for get_user..."
+
+def test_sync_chunks_to_pinecone_deletes_old_vector_for_renamed_chunk(monkeypatch):
+    upserted = []
+    deleted_ids = []
+
+    monkeypatch.setattr(
+        "app.vectorstore.pinecone_client.upsert_chunks",
+        lambda chunks, namespace: upserted.extend(chunks),
+    )
+    monkeypatch.setattr(
+        "app.vectorstore.pinecone_client.delete_chunk",
+        lambda chunk_id, namespace: deleted_ids.append(chunk_id),
+    )
+
+    renamed_chunk = {
+        "chunk_id": "src/users.py::fetch_user",
+        "embed_text": "...",
+        "metadata": {
+            "chunk_id": "src/users.py::fetch_user",
+            "function_name": "fetch_user",
+            "change_type": "renamed",
+            "old_name": "get_user",
+            "old_chunk_id": "src/users.py::get_user",
+        },
+    }
+
+    sync_chunks_to_pinecone([renamed_chunk], namespace="test-repo")
+
+    assert len(upserted) == 1
+    assert upserted[0]["chunk_id"] == "src/users.py::fetch_user"
+    assert deleted_ids == ["src/users.py::get_user"]
