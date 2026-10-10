@@ -1,6 +1,6 @@
 # tests/test_diffing_chunking_integration.py
 import pytest
-from app.diffing.ast_parser import diff_definitions
+from app.diffing.ast_parser import extract_definitions, diff_definitions, detect_renames
 from app.chunking.chunker import chunk_diff
 from app.embeddings.embedder import embed_text, EMBEDDING_DIMENSION
 from app.vectorstore.pinecone_client import (
@@ -824,3 +824,120 @@ def test_webhook_rejects_non_allowlisted_repo(monkeypatch):
         },
     )
     assert response.status_code == 403
+
+def test_detect_renames_identifies_pure_rename_with_identical_body():
+    old_defs = {
+        "get_user": {
+            "signature": "def get_user(user_id):",
+            "body": "    return db.query(User).filter_by(id=user_id).first()",
+        }
+    }
+    new_defs = {
+        "fetch_user": {
+            "signature": "def fetch_user(user_id):",
+            "body": "    return db.query(User).filter_by(id=user_id).first()",
+        }
+    }
+
+    renamed, still_deleted, still_added = detect_renames(
+        deleted_names={"get_user"},
+        added_names={"fetch_user"},
+        old_defs=old_defs,
+        new_defs=new_defs,
+    )
+
+    assert len(renamed) == 1
+    entry = renamed[0]
+    assert entry["old_name"] == "get_user"
+    assert entry["new_name"] == "fetch_user"
+    assert entry["change_type"] == "none"
+    assert entry["similarity"] == 1.0
+    assert still_deleted == set()
+    assert still_added == set()
+
+def test_detect_renames_identifies_rename_with_minor_body_change():
+    old_defs = {
+        "get_user": {
+            "signature": "def get_user(user_id):",
+            "body": "    user = db.query(User).filter_by(id=user_id).first()\n    return user",
+        }
+    }
+    new_defs = {
+        "fetch_user": {
+            "signature": "def fetch_user(user_id):",
+            "body": "    user = db.query(User).filter_by(id=user_id).first()\n    return user  # cached lookup",
+        }
+    }
+
+    renamed, still_deleted, still_added = detect_renames(
+        deleted_names={"get_user"},
+        added_names={"fetch_user"},
+        old_defs=old_defs,
+        new_defs=new_defs,
+    )
+
+    assert len(renamed) == 1
+    entry = renamed[0]
+    assert entry["change_type"] == "body_only"
+    assert 0.8 <= entry["similarity"] < 1.0
+
+def test_detect_renames_ignores_dissimilar_functions():
+    old_defs = {
+        "get_user": {
+            "signature": "def get_user(user_id):",
+            "body": "    return db.query(User).filter_by(id=user_id).first()",
+        }
+    }
+    new_defs = {
+        "send_email": {
+            "signature": "def send_email(to, subject, body):",
+            "body": "    smtp.connect()\n    smtp.send(to, subject, body)\n    smtp.close()",
+        }
+    }
+
+    renamed, still_deleted, still_added = detect_renames(
+        deleted_names={"get_user"},
+        added_names={"send_email"},
+        old_defs=old_defs,
+        new_defs=new_defs,
+    )
+
+    assert renamed == []
+    assert still_deleted == {"get_user"}
+    assert still_added == {"send_email"}
+
+def test_detect_renames_claims_best_match_and_leaves_others_unmatched():
+    old_defs = {
+        "notify_user": {
+            "signature": "def notify_user(to, msg):",
+            "body": "    client.post('/notify', data={'to': to, 'msg': msg})\n    return True",
+        },
+        "notify_user_old": {
+            "signature": "def notify_user_old(to, msg):",
+            "body": "    client.post('/notify', data={'to': to, 'msg': msg})\n    return False",
+        },
+    }
+    new_defs = {
+        "send_notification": {
+            "signature": "def send_notification(to, msg):",
+            "body": "    client.post('/notify', data={'to': to, 'msg': msg})\n    return True",
+        }
+    }
+
+    renamed, still_deleted, still_added = detect_renames(
+        deleted_names={"notify_user", "notify_user_old"},
+        added_names={"send_notification"},
+        old_defs=old_defs,
+        new_defs=new_defs,
+    )
+
+    # notify_user has a perfect body match (score 1.0), so it should win the
+    # claim over notify_user_old, whose body is only similar, not identical.
+    assert len(renamed) == 1
+    assert renamed[0]["old_name"] == "notify_user"
+    assert renamed[0]["new_name"] == "send_notification"
+    assert renamed[0]["similarity"] == 1.0
+
+    # The loser falls back to a plain deletion — never forced into a wrong match.
+    assert still_deleted == {"notify_user_old"}
+    assert still_added == set()
