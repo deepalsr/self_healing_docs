@@ -71,7 +71,11 @@ def process_webhook_event(payload: dict):
             new_content = fetch_file_content(owner, repo, file_path, after_sha) or ""
 
             diff_result = diff_definitions(old_content, new_content)
-            changed_names = [e["name"] for e in diff_result["added"] + diff_result["modified"]]
+            changed_names = (
+                [e["name"] for e in diff_result["added"] + diff_result["modified"]]
+                + [e["old_name"] for e in diff_result["renamed"]]
+                + [e["new_name"] for e in diff_result["renamed"]]
+            )
             if not changed_names:
                 logger.info(f"{file_path}: only deletions, skipping doc generation")
                 continue

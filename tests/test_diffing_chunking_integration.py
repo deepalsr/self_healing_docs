@@ -688,6 +688,7 @@ def test_process_webhook_event_wires_pipeline_and_opens_one_pr_per_changed_funct
         "added": [{"name": "create_user", "signature": "def create_user(name)", "body": "..."}],
         "deleted": [],
         "modified": [],
+        "renamed": [],
     }
 
     fake_chunks = [
@@ -1003,3 +1004,48 @@ def test_sync_chunks_to_pinecone_deletes_old_vector_for_renamed_chunk(monkeypatc
     assert len(upserted) == 1
     assert upserted[0]["chunk_id"] == "src/users.py::fetch_user"
     assert deleted_ids == ["src/users.py::get_user"]
+
+def test_process_webhook_event_handles_renamed_function_end_to_end():
+    fake_diff_result = {
+        "added": [],
+        "deleted": [],
+        "modified": [],
+        "renamed": [{
+            "old_name": "get_user",
+            "new_name": "fetch_user",
+            "similarity": 1.0,
+            "old_signature": "def get_user(user_id):",
+            "new_signature": "def fetch_user(user_id):",
+            "old_body": "    return db.get(user_id)",
+            "new_body": "    return db.get(user_id)",
+            "change_type": "none",
+        }],
+    }
+
+    fake_chunk = {
+        "chunk_id": "src/users.py::fetch_user",
+        "embed_text": "...",
+        "metadata": {
+            "function_name": "fetch_user",
+            "change_type": "renamed",
+            "old_name": "get_user",
+            "old_chunk_id": "src/users.py::get_user",
+        },
+    }
+
+    fake_result = PipelineResult(status="approved", patch=None, attempts=1)
+
+    with mock_patch("app.main.fetch_file_content", return_value="file content") as m_fetch, \
+         mock_patch("app.main.diff_definitions", return_value=fake_diff_result) as m_diff, \
+         mock_patch("app.main.resolve_doc_path", return_value="README.md") as m_resolve, \
+         mock_patch("app.main.fetch_doc_snippets_for_functions", return_value={}) as m_snippets, \
+         mock_patch("app.main.chunk_diff", return_value=[fake_chunk]) as m_chunk, \
+         mock_patch("app.main.sync_chunks_to_pinecone") as m_sync, \
+         mock_patch("app.main.ensure_index_exists") as m_ensure, \
+         mock_patch("app.main.retrieve_context_for_chunk", return_value={"strategy": "exact_match", "results": []}) as m_retrieve, \
+         mock_patch("app.main.generate_verified_patch", return_value=fake_result) as m_generate, \
+         mock_patch("app.main.open_doc_pr") as m_pr:
+
+        process_webhook_event(FAKE_PUSH_PAYLOAD)
+
+    # changed_names passed to doc-snippet
